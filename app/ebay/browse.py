@@ -8,6 +8,7 @@ import requests
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.ebay.auth import EbayOAuthError, _require_admin_key, get_application_token
+from app.ebay.classifier import classify_listing
 
 
 EBAY_BROWSE_SEARCH_URL = (
@@ -35,17 +36,23 @@ def _money(value: Any) -> dict[str, str] | None:
 
 def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     image = item.get("image") if isinstance(item.get("image"), dict) else {}
+    title = item.get("title")
+    condition = item.get("condition")
 
     return {
         "item_id": item.get("itemId"),
         "legacy_item_id": item.get("legacyItemId"),
-        "title": item.get("title"),
+        "title": title,
         "price": _money(item.get("price")),
-        "condition": item.get("condition"),
+        "condition": condition,
         "buying_options": item.get("buyingOptions", []),
         "image_url": image.get("imageUrl"),
         "item_web_url": item.get("itemWebUrl"),
         "listing_marketplace_id": item.get("listingMarketplaceId"),
+        "classification": classify_listing(
+            title=title,
+            ebay_condition=condition,
+        ),
     }
 
 
@@ -104,17 +111,28 @@ def search_items(
     if not isinstance(summaries, list):
         summaries = []
 
+    normalized_items = [
+        _normalize_item(item)
+        for item in summaries
+        if isinstance(item, dict)
+    ]
+
+    classification_counts: dict[str, int] = {}
+    for item in normalized_items:
+        result = item.get("classification")
+        if not isinstance(result, dict):
+            continue
+        bucket = str(result.get("analytics_bucket", "UNKNOWN"))
+        classification_counts[bucket] = classification_counts.get(bucket, 0) + 1
+
     return {
         "query": query,
         "marketplace_id": marketplace_id,
         "total": payload.get("total", 0),
         "limit": payload.get("limit", limit),
         "offset": payload.get("offset", 0),
-        "items": [
-            _normalize_item(item)
-            for item in summaries
-            if isinstance(item, dict)
-        ],
+        "classification_counts": classification_counts,
+        "items": normalized_items,
     }
 
 
@@ -126,7 +144,7 @@ def ebay_search(
     x_pokeanalysis_admin_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """
-    Search active eBay listings.
+    Search active eBay listings and classify each result.
 
     This development endpoint is protected with the PokeAnalysis admin key to
     prevent public callers from consuming eBay API quota.
