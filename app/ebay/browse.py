@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
@@ -14,6 +15,8 @@ from app.ebay.classifier import classify_listing
 EBAY_BROWSE_SEARCH_URL = (
     "https://api.ebay.com/buy/browse/v1/item_summary/search"
 )
+
+logger = logging.getLogger("pokeanalysis.ebay.browse")
 
 router = APIRouter(prefix="/api/ebay", tags=["eBay Browse"])
 
@@ -34,10 +37,47 @@ def _money(value: Any) -> dict[str, str] | None:
     return {"value": str(amount), "currency": str(currency)}
 
 
+def _classifier_error_result(exc: Exception) -> dict[str, Any]:
+    """Return a safe fallback so one unusual eBay listing cannot break a search."""
+    return {
+        "classification": "REJECTED",
+        "analytics_bucket": "CLASSIFIER_ERROR",
+        "include": False,
+        "needs_review": True,
+        "grading_company": None,
+        "grade": None,
+        "raw_condition": None,
+        "confidence": 0.0,
+        "reasons": ["classifier_error", type(exc).__name__],
+        "signals": {
+            "years": [],
+            "card_numbers": [],
+            "language": None,
+            "variant_flags": [],
+        },
+    }
+
+
 def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     image = item.get("image") if isinstance(item.get("image"), dict) else {}
     title = item.get("title")
     condition = item.get("condition")
+
+    try:
+        classification = classify_listing(
+            title=title,
+            ebay_condition=condition,
+        )
+    except Exception as exc:
+        # A marketplace title can contain unexpected values. Do not let one bad
+        # listing take down the entire search response; mark it for review and
+        # record the exception type in Render logs without exposing secrets.
+        logger.exception(
+            "Classifier failed for eBay item_id=%s legacy_item_id=%s",
+            item.get("itemId"),
+            item.get("legacyItemId"),
+        )
+        classification = _classifier_error_result(exc)
 
     return {
         "item_id": item.get("itemId"),
@@ -49,10 +89,7 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
         "image_url": image.get("imageUrl"),
         "item_web_url": item.get("itemWebUrl"),
         "listing_marketplace_id": item.get("listingMarketplaceId"),
-        "classification": classify_listing(
-            title=title,
-            ebay_condition=condition,
-        ),
+        "classification": classification,
     }
 
 
@@ -106,7 +143,11 @@ def search_items(
             f"eBay Browse API failed ({response.status_code}): {message}"
         )
 
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise EbayBrowseError("eBay returned an invalid JSON response.") from exc
+
     summaries = payload.get("itemSummaries", [])
     if not isinstance(summaries, list):
         summaries = []
@@ -158,4 +199,5 @@ def ebay_search(
             marketplace_id=marketplace_id,
         )
     except EbayBrowseError as exc:
+        logger.exception("eBay Browse search failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
