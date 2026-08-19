@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.ebay.auth import router as ebay_oauth_router
+from app.ebay.browse import router as ebay_browse_router
 
 load_dotenv()
 
@@ -20,14 +21,15 @@ logger = logging.getLogger("pokeanalysis.ebay_compliance")
 
 app = FastAPI(
     title="PokeAnalysis API",
-    version="1.1.0",
+    version="1.2.0",
     description=(
-        "PokeAnalysis backend with eBay Marketplace Account Deletion compliance "
-        "and eBay Production OAuth support."
+        "PokeAnalysis backend with eBay Marketplace Account Deletion compliance, "
+        "Production OAuth, and Browse API search support."
     ),
 )
 
 app.include_router(ebay_oauth_router)
+app.include_router(ebay_browse_router)
 
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,80}$")
 EXPECTED_TOPIC = "MARKETPLACE_ACCOUNT_DELETION"
