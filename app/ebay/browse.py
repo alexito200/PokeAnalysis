@@ -16,6 +16,11 @@ EBAY_BROWSE_SEARCH_URL = (
     "https://api.ebay.com/buy/browse/v1/item_summary/search"
 )
 
+# PokeAnalysis intentionally focuses graded analytics on 8, 9, and 10 only.
+# The classifier can still identify other grades, but they are excluded from
+# downstream pricing calculations and user-facing graded market analytics.
+SUPPORTED_GRADED_GRADES = {8, 9, 10}
+
 logger = logging.getLogger("pokeanalysis.ebay.browse")
 
 router = APIRouter(prefix="/api/ebay", tags=["eBay Browse"])
@@ -46,6 +51,7 @@ def _classifier_error_result(exc: Exception) -> dict[str, Any]:
         "needs_review": True,
         "grading_company": None,
         "grade": None,
+        "grade_supported": None,
         "raw_condition": None,
         "confidence": 0.0,
         "reasons": ["classifier_error", type(exc).__name__],
@@ -58,6 +64,33 @@ def _classifier_error_result(exc: Exception) -> dict[str, Any]:
     }
 
 
+def _apply_grade_focus(classification: dict[str, Any]) -> dict[str, Any]:
+    """Exclude graded listings outside the supported 8/9/10 analytics range.
+
+    We intentionally leave RAW records unchanged. Graded records below 8 or
+    unresolved/half grades remain classified for diagnostics, but they cannot
+    enter price averages, multipliers, charts, or recent-sale analytics.
+    """
+    result = dict(classification)
+    result["reasons"] = list(classification.get("reasons", []))
+
+    classification_name = result.get("classification")
+    if classification_name not in {"PSA", "OTHER_GRADED"}:
+        result["grade_supported"] = None
+        return result
+
+    grade = result.get("grade")
+    grade_supported = grade in SUPPORTED_GRADED_GRADES
+    result["grade_supported"] = grade_supported
+
+    if not grade_supported:
+        result["include"] = False
+        if "grade_outside_supported_range" not in result["reasons"]:
+            result["reasons"].append("grade_outside_supported_range")
+
+    return result
+
+
 def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     image = item.get("image") if isinstance(item.get("image"), dict) else {}
     title = item.get("title")
@@ -68,6 +101,7 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
             title=title,
             ebay_condition=condition,
         )
+        classification = _apply_grade_focus(classification)
     except Exception as exc:
         # A marketplace title can contain unexpected values. Do not let one bad
         # listing take down the entire search response; mark it for review and
@@ -172,6 +206,7 @@ def search_items(
         "total": payload.get("total", 0),
         "limit": payload.get("limit", limit),
         "offset": payload.get("offset", 0),
+        "supported_graded_grades": sorted(SUPPORTED_GRADED_GRADES),
         "classification_counts": classification_counts,
         "items": normalized_items,
     }
